@@ -100,25 +100,33 @@ as.data.frame(columnas_nas)
 
 #########################################################################################################
 
-
-ggplot(train) + geom_bar(mapping = aes(x = TutorialStart)) + facet_wrap(~TutorialFinish) 
-+ xlab('Empezo el tutorial')
+ggplot(train) + geom_bar(mapping = aes(x = TutorialStart)) + facet_wrap(~TutorialFinish) + xlab('Empezo el tutorial')
 
 ggplot(train) + geom_bar(mapping = aes(x = platform))
 
-ggplot(train) + geom_bar(mapping = aes(y = country)) # Hay muchos paises y se superponen, es dificil ver quien tiene mas, una table me puede dar mas info
 
 # Armo un top de los paises con mas usuarios
 
 sort(table(train$country), decreasing = TRUE)[c(1:10)]
-                         
+
 # Hay que tener cuidado porque en algunos paises no hay registros, con lo cual, puede terminar influyendo al modelo
 
-select(train, site)
-  
-colnames(train)
 
-print('hola')
+tabla <-prop.table(table(train$country,churn = train$Label),1)[,2]
+
+pdf("imagen01.pdf")
+
+barplot(sort(tabla, decreasing = FALSE), horiz = TRUE, ylab = 'Pais', xlab = 'Ratio de churn'
+        , main = 'Proporción de churn por pais')
+dev.off() 
+
+train$churn <- train$Label == 1
+
+ggplot(train) + geom_bar(mapping = aes(x = platform, fill = churn), position = 'fill') +
+  labs(title = 'Proporcion de churn por plataforma', x = 'Plataforma', y = '%')
+
+
+grepl('^sum_dsi:',colnames(train))
 
 
 
