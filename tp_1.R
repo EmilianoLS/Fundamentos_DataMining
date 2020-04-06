@@ -1,8 +1,12 @@
 install.packages('data.table')
+install.packages("stringr")
+install.packages("gridExtra")
 
+library("stringr")
 library("data.table")
 library(ggplot2)
 library("dplyr")
+library(gridExtra)
 
 
 load_csv_data <- function(csv_file, sample_ratio = 1, drop_cols = NULL,
@@ -126,8 +130,28 @@ ggplot(train) + geom_bar(mapping = aes(x = platform, fill = churn), position = '
   labs(title = 'Proporcion de churn por plataforma', x = 'Plataforma', y = '%')
 
 
-grepl('^sum_dsi:',colnames(train))
+# Cuantas columnas hay que terminan en 'sum_dsi'
 
+columnas_sum <- length(colnames(train)[c(str_detect(colnames(train), 'sum_dsi'))])
+
+for (i in seq(1,columnas_sum,4)){
+  print(i)
+}
+
+plot1 <- ggplot(train) + geom_boxplot(aes(BuyCard_sum_dsi0),outlier.colour = 'red', outlier.shape = 1, outlier.alpha = 0.3) 
+plot2 <- ggplot(train) + geom_boxplot(aes(BuyCard_sum_dsi1),outlier.colour = 'red', outlier.shape = 1, outlier.alpha = 0.3)
+plot3 <- ggplot(train) + geom_boxplot(aes(BuyCard_sum_dsi2),outlier.colour = 'red', outlier.shape = 1, outlier.alpha = 0.3)
+plot4 <- ggplot(train) + geom_boxplot(aes(BuyCard_sum_dsi3),outlier.colour = 'red', outlier.shape = 1, outlier.alpha = 0.3)
+  
+grid.arrange(plot1,plot2,plot3,plot4, nrow = 2, ncol = 2)
+
+
+
+
+
+select(train, colnames(train)[c(str_detect(colnames(train), 'sum_dsi'))][c(1:4)+i][1])
+
+summary(train)
 
 
 
