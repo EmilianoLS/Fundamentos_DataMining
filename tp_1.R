@@ -8,6 +8,7 @@ library(ggplot2)
 library("dplyr")
 library(gridExtra)
 
+file_route <- 'C:Users/elosasso/OneDrive - Universidad Torcuato Di Tella/Mineria de datos/Fundamentos_DataMining'
 
 load_csv_data <- function(csv_file, sample_ratio = 1, drop_cols = NULL,
                           sel_cols = NULL) {
@@ -129,29 +130,48 @@ train$churn <- train$Label == 1
 ggplot(train) + geom_bar(mapping = aes(x = platform, fill = churn), position = 'fill') +
   labs(title = 'Proporcion de churn por plataforma', x = 'Plataforma', y = '%')
 
+# Quiero ver si la cantidad de veces que gano o perdió, en función de las partidas iniciadas pueden estar relacionados con el churn
+# Creo las variables sumadas de todas las veces que:
+# Perdio una batalla
 
+train$losebattle <- train$LoseBattle_sum_dsi0 + train$LoseBattle_sum_dsi1 + train$LoseBattle_sum_dsi2 + train$LoseBattle_sum_dsi3
+
+# Gano una batalla
+
+train$winbattle <- train$WinBattle_sum_dsi0 + train$WinBattle_sum_dsi1 + train$WinBattle_sum_dsi2 + train$WinBattle_sum_dsi3
+
+# Empezó una batalla
+
+train$startbattle <- train$StartBattle_sum_dsi0 + train$StartBattle_sum_dsi1 + train$StartBattle_sum_dsi2 + train$StartBattle_sum_dsi3
+
+# Creo las proporciones
+
+train$lose_vs_start_battle <- train$losebattle/train$startbattle
+train$lose_vs_win_battle <- train$losebattle/train$winbattle
+
+# Grafico
+
+ggplot(train) + geom_histogram(aes(x = lose_vs_start_battle, alpha = 0.3, fill = churn))
+ggplot(train) + geom_histogram(aes(x = lose_vs_win_battle, alpha = 0.3, fill = churn))
 # Cuantas columnas hay que terminan en 'sum_dsi'
 
+columnas_sum_names <- colnames(train)[c(str_detect(colnames(train), 'sum_dsi'))]
 columnas_sum <- length(colnames(train)[c(str_detect(colnames(train), 'sum_dsi'))])
 
-for (i in seq(1,columnas_sum,4)){
-  print(i)
-}
 
 plot1 <- ggplot(train) + geom_boxplot(aes(BuyCard_sum_dsi0),outlier.colour = 'red', outlier.shape = 1, outlier.alpha = 0.3) 
 plot2 <- ggplot(train) + geom_boxplot(aes(BuyCard_sum_dsi1),outlier.colour = 'red', outlier.shape = 1, outlier.alpha = 0.3)
 plot3 <- ggplot(train) + geom_boxplot(aes(BuyCard_sum_dsi2),outlier.colour = 'red', outlier.shape = 1, outlier.alpha = 0.3)
 plot4 <- ggplot(train) + geom_boxplot(aes(BuyCard_sum_dsi3),outlier.colour = 'red', outlier.shape = 1, outlier.alpha = 0.3)
   
-grid.arrange(plot1,plot2,plot3,plot4, nrow = 2, ncol = 2)
+final_plot <- grid.arrange(plot1,plot2,plot3,plot4, nrow = 2, ncol = 2, top = 'BuyCard')
+
+ggsave("test.pdf", plot = final_plot, width = 20, height = 20, units = "cm")
 
 
+colnames(train, colnames(train)[c(str_detect(colnames(train), 'sum_dsi'))][c(1:4)][1])
 
-
-
-select(train, colnames(train)[c(str_detect(colnames(train), 'sum_dsi'))][c(1:4)+i][1])
-
-summary(train)
+summary(select(train, columnas_sum_names))
 
 
 
