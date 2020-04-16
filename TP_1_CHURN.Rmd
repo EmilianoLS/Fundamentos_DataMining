@@ -1,0 +1,610 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Importo las librerias que voy a usar
+
+```{r}
+library("stringr")
+library("data.table")
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(reshape2)
+library(stats)
+library(corrplot)
+library(class)
+library(fastDummies)
+library(rpart)
+library(caret)
+library(rpart.plot)
+```
+
+Defino funcion para cargar todos los data frames de entrenamiento
+
+```{r}
+load_csv_data <- function(csv_file, sample_ratio = 1, drop_cols = NULL,
+                          sel_cols = NULL) {
+  # Esta funcion carga un unico csv con los parametros que le indique
+  
+  dt <- fread(csv_file, header = TRUE, sep = ",", stringsAsFactors = TRUE,
+              na.strings = "", drop = drop_cols, select = sel_cols,
+              showProgress = TRUE)
+  return(dt)
+}
+
+
+
+load_train_data <- function(data_dir, train_file="/train_", sample_ratio=1,
+                            drop_cols=NULL, sel_cols=NULL) {
+  # Esta funcion se encarga de concatenar todos los dataframes juntos
+  
+  
+  
+  train_days <- seq(1, 5, by=1)
+  
+  dfs <- list()
+  
+  for (i in train_days){
+  
+    dfs[[i]] <- load_csv_data(csv_file = paste(data_dir,train_file,as.character(i),".csv", sep = ''), 
+                              sample_ratio = sample_ratio, drop_cols = drop_cols, sel_cols = sel_cols)
+  }
+  
+  # Uno todos los dataframes en uno solo
+  
+  df <- (rbindlist(dfs, fill=TRUE))
+  
+  # Reordeno las columnas alfabeticamente
+  
+  setcolorder(df, sort(colnames(df)))
+  
+  # Creo la columna Label con las condiciones de churn explicadas
+  
+  df[, Label := as.numeric(Label_max_played_dsi == 3)] 
+  set.seed(123)
+  if (sample_ratio < 1) {
+    
+    sample_size <- as.integer(sample_ratio * nrow(df))
+    
+    df <- df[sample(.N, sample_size)]
+  }
+  
+  rm(dfs)
+  
+  
+  return(df)
+}
+```
+
+Cargo dataframe de un tamaño del 10% del original
+
+```{r}
+csv_dir <- "C:/Users/elosasso/OneDrive - Universidad Torcuato Di Tella/Mineria de datos/datasets"
+
+train <- load_train_data(csv_dir, sample_ratio = 1)
+train$churn <- train$Label == 1
+```
+
+```{r}
+head((train));dim(train)
+```
+
+```{r}
+summary(train)
+```
+
+* La columna 'age' no puede tomarse para analizar por su alto contenido de NAs, no podemos inferir estos datos de ninguna forma
+* La columna 'BuyCard_sum_dsi1' tiene valores negativos, esto pareciera ser un error, y viendo el comportamiento en las demas columnas de este estilo, podria imputarse el valor 0 a estos negativos
+
+Reviso las columnas con valores nulos y sus porcentajes
+Para eso creo una función que me trae el porcentaje de nulos en las columnas que unicamente tienen nulos
+
+```{r}
+find_nulls <- function(df){
+    columnas_nas <- list()
+
+    for (i in colnames(df)){
+      nans <- nrow(filter(select(df,i), !complete.cases(select(df,i))))
+
+      if (nans != 0){
+
+        columnas_nas[[i]] <- (nans/nrow(df))*100
+      }
+
+    }
+    return(columnas_nas)
+    }
+
+as.data.frame(find_nulls(train))
+```
+
+
+Hago una analítica sobre algunas variables para entender su relación con la target a predecir
+
+```{r}
+ggplot(train) + geom_bar(mapping = aes(x = TutorialFinish, fill = churn), position = 'fill') +
+labs(x = 'Termino el tutorial', y = '% churn') +
+ggtitle('Proporcion de churn según terminó o no el tutorial')
+```
+
+Me imagino que una persona haría Churn según haya perdido más batallas en los primeros días. Pongo a prueba esa suposición creando la sumatoria de las variables Lose battle, Win battle y Start battle
+
+```{r}
+train$sum_lost_battles <- train$LoseBattle_sum_dsi0 + train$LoseBattle_sum_dsi1 + train$LoseBattle_sum_dsi2 + train$LoseBattle_sum_dsi3
+train$sum_win_battles <- train$WinBattle_sum_dsi0 + train$WinBattle_sum_dsi1 + train$WinBattle_sum_dsi2 + train$WinBattle_sum_dsi3
+train$sum_start_battle <- train$StartBattle_sum_dsi0 + train$StartBattle_sum_dsi1 + train$StartBattle_sum_dsi2 + train$StartBattle_sum_dsi3
+
+# Tomo una muestra del 10% del total para graficar los puntos porque sino es muy pesado
+
+set.seed(123)
+sample_size <- as.integer(0.1 * nrow(train))    
+df <- train[sample(.N, sample_size)]
+
+ggplot(filter(df, complete.cases(sum_start_battle))) +
+geom_point(mapping = aes(x = sum_start_battle, y = sum_lost_battles, color = churn), alpha = 0.3) +
+geom_smooth(mapping = aes(x = sum_start_battle, y = sum_lost_battles)) +
+labs(x = 'Batallas iniciadas', y = 'Batallas perdidas') +
+ggtitle('Batallas perdidas vs Batallas iniciadas')
+```
+
+Podría ocurrir que haya alguna relación entre la cantidad de sesiones iniciadas y el hecho de hacer churn. Se busca la cantidad de sesiones iniciadas para los primeros 4 días desde la instalación hasta el día 3, para ambos grupos.
+
+Luego se calcula la media de sesiones iniciadas para entender si verdaderamente hay una relación
+
+```{r}
+train_melt <- melt(select(train, user_id, StartSession_sum_dsi0,StartSession_sum_dsi1,StartSession_sum_dsi2,
+                          StartSession_sum_dsi3, churn), id = c('user_id','churn'))
+
+grafico <- train_melt %>% group_by(variable,churn) %>% summarize(total = sum(value)) %>% ungroup()
+grafico
+
+ggplot(grafico, mapping = aes(x = total, y = variable, fill = churn)) +
+geom_bar(color = 'black',stat = 'identity', position = 'dodge') + facet_wrap(~churn, ncol = 1) +
+labs(x = 'Total de sesiones', y = 'Dia') +
+ggtitle('Cantidad de sesiones por día')
+```
+
+Agrupo por dia desde la instalacion y calculo el intervalo de confianza para la media
+
+```{r}
+grafico_2 <- train_melt %>% group_by(variable,churn) %>%
+summarize(intervalo_inf = t.test(value, conf.level = 0.95)$conf.int[1], 
+         intervalo_sup = t.test(value, conf.level = 0.95)$conf.int[2],
+         mean = mean(value)) %>% ungroup()
+
+grafico_2
+
+ggplot(grafico_2) +
+geom_point(mapping = aes(x = mean, y = variable, fill = churn),color = 'black',stat = 'identity') + 
+geom_errorbar(aes(xmin = intervalo_inf, xmax = intervalo_sup, y = variable), color = 'red') +
+facet_wrap(~churn, ncol = 1) +
+labs(x = 'Media de sesiones', y = 'Dia') + 
+ggtitle('Cantidad de sesiones promedio por día')
+```
+
+Quiero entender la cantidad de instalaciones por día que hay, para ver si hay alguna tendencia
+
+```{r}
+grafico_3 <- train %>% group_by(install_date) %>% summarize(total_installed = n()) %>% ungroup()
+
+ggplot(grafico_3) + geom_line(mapping = aes(x = install_date, y = total_installed)) +
+geom_vline(xintercept = c(398:399), color = 'red', linetype = 'dashed') +
+geom_vline(xintercept = c(134,29,133,28,246), color = 'blue', linetype = 'dashed') +
+geom_text(aes(x = 134, label="\n 34260 instalaciones", y = 30000), colour="blue", angle=90, text=element_text(size=5)) + 
+geom_text(aes(x = 29, label="\n 32773 instalaciones", y = 30000), colour="blue", angle=90, text=element_text(size=5))+
+geom_text(aes(x = 243, label="\n 29196 instalaciones", y = 30000), colour="blue", angle=90, text=element_text(size=5)) +
+labs(x = 'Dia de instalacion', y = 'Cantidad de instalaciones') + 
+ggtitle('Evolucion de las instalaciones')
+```
+
+Busco si existe una relación entre la cantidad de batallas ganadas/ batallas perdidas
+
+```{r}
+train$rt_lose_win_0 <- train$WinBattle_sum_dsi0 - train$LoseBattle_sum_dsi0
+train$rt_lose_win_1 <- train$WinBattle_sum_dsi1 - train$LoseBattle_sum_dsi1
+train$rt_lose_win_2 <- train$WinBattle_sum_dsi2 - train$LoseBattle_sum_dsi2
+train$rt_lose_win_3 <- train$WinBattle_sum_dsi3 - train$LoseBattle_sum_dsi3
+
+train_melt <- melt(select(train, user_id, rt_lose_win_0,rt_lose_win_1,rt_lose_win_2,
+                          rt_lose_win_3, churn), id = c('user_id','churn'))
+
+grafico_4 <- train_melt %>% group_by(variable,churn) %>%
+summarize(intervalo_inf = t.test(value, conf.level = 0.95)$conf.int[1], 
+         intervalo_sup = t.test(value, conf.level = 0.95)$conf.int[2],
+         mean = mean(value)) %>% ungroup()
+
+ggplot(grafico_4) +
+geom_point(mapping = aes(x = mean, y = variable, fill = churn),color = 'black',stat = 'identity') + 
+geom_errorbar(aes(xmin = intervalo_inf, xmax = intervalo_sup, y = variable), color = 'red') +
+facet_wrap(~churn, ncol = 1) +
+labs(x = 'Media de resultados por dia', y = 'Dia') + 
+ggtitle('Resultados promedio por día')
+```
+
+Promedio de batallas perdidas por día
+
+```{r}
+train_melt <- melt(select(train, user_id, LoseBattle_sum_dsi0,LoseBattle_sum_dsi1,LoseBattle_sum_dsi2,
+                          LoseBattle_sum_dsi3, churn), id = c('user_id','churn'))
+
+grafico_5 <- train_melt %>% group_by(variable,churn) %>%
+summarize(intervalo_inf = t.test(value, conf.level = 0.95)$conf.int[1], 
+         intervalo_sup = t.test(value, conf.level = 0.95)$conf.int[2],
+         mean = mean(value)) %>% ungroup()
+
+ggplot(grafico_5) +
+geom_point(mapping = aes(x = mean, y = variable, fill = churn),color = 'black',stat = 'identity') + 
+geom_errorbar(aes(xmin = intervalo_inf, xmax = intervalo_sup, y = variable), color = 'red') +
+facet_wrap(~churn, ncol = 1) +
+labs(x = 'Media de batallas perdidas', y = 'Dia') + 
+ggtitle('Batallas perdidas en promedio por día')
+```
+
+Promedio de batallas iniciadas (esto lo hago para entender si la menor cantidad de batallas perdidas por aquellos que hicieron churn en el gráfico anterior se debe a que jugaron menos)
+
+```{r}
+train_melt <- melt(select(filter(train,complete.cases(StartBattle_sum_dsi1)), user_id,
+                          StartBattle_sum_dsi0,StartBattle_sum_dsi1,StartBattle_sum_dsi2,
+                          StartBattle_sum_dsi3, churn), id = c('user_id','churn'))
+
+grafico_6 <- train_melt %>% group_by(variable,churn) %>%
+summarize(intervalo_inf = t.test(value, conf.level = 0.95)$conf.int[1], 
+         intervalo_sup = t.test(value, conf.level = 0.95)$conf.int[2],
+         mean = mean(value)) %>% ungroup()
+
+ggplot(grafico_6) +
+geom_point(mapping = aes(x = mean, y = variable, fill = churn),color = 'black',stat = 'identity') + 
+geom_errorbar(aes(xmin = intervalo_inf, xmax = intervalo_sup, y = variable), color = 'red') +
+facet_wrap(~churn, ncol = 1) +
+labs(x = 'Media de batallas inicidadas', y = 'Dia') + 
+ggtitle('Batallas iniciadas en promedio por día')
+```
+
+Ahora que ya preparamos una analítica y comprendemos un poco mejor los datos, procedemos a preparar las variables para poder aplicarles un modelo de knn.
+Primero tengo que excluir los casos no confiables: Todos aquellos que tengan Label_max_played_dsi igual a 3, que hayan sido instalados en los días que van de 383 a 395 inclusive, ya que no son validos (desconozco si la persona hizo churn o no)
+
+```{r}
+train_filtered <- filter(train, !(Label_max_played_dsi == 3 & install_date %in% (c(383:395))))
+```
+
+Antes de avanzar sobre la separación del dataset en conjuntos de train, validation & test se evalúan qué variables podrían llegar a ser relevantes o no para el modelo.
+
+NOTA: Para este primer summit, no se va a considerar ningun tipo de feature engineering del tipo de construccion de variables. Es decir, no se construiran variables nuevas a partir de las existentes, salvo para las categoricas. Se tomo esta decisión para entender el nivel de accuracy que tendria el modelo si tan solo utiliza las variables dadas. Es para tener una base de control, un accuracy minimo y sobre el cual ir trabajando.
+
+Como se había visto anteriormente, las variables de age y site tienen un alto porcentaje de valores faltantes, y no es posible imputarlos de ninguna forma, por lo que se desconsideran para el modelo. Esto es lamentable en el caso de age, ya que probablemente (no lo sabemos), podría haber sido un predictor importante.
+
+Por otro lado, el resto de las columnas con valores nulos se decide imputarles la media. Excepto por device_model, que se decidio eliminar los registros nulos porque son muy pocos y no afectará al modelo significativamente. Tambien se elimniaran los registros nulos de country porque, si bien podría llegar a ser una columna importante, solamente estaríamos borrando el 2% de los registros
+
+Tambien se vio que la columna BuyCard_sum_dsi_1 tiene valores negativos! Si bien esto se puede interpretar como que se le 'regalo' una carta, el hecho de que en las otras columnas de BuyCard_sum_dsi no hubiese valores negativos, lleva a pensar que son valores erroneos. Tomamos la decision de convertir estos valores negativos a 0, ya que es lo mas comun que observamos en las otras (entendemos el error que esto puede traer, pero es mejor que descartar completamente esta columna)
+
+```{r}
+# Reemplazo valores negativos de la columna BuyCard_sum_dsi1 con cero
+
+train_filtered$BuyCard_sum_dsi1[train_filtered$BuyCard_sum_dsi1 < 0] <- 0
+# Ecluyo las columnas age y site de mi dataframe
+
+train_filtered <- select(train_filtered, -c(age, site))
+
+# Elimnio los registros NA en la columna device_model
+
+train_filtered <- filter(train_filtered, complete.cases(device_model))
+
+# Imputo la media para el resto de las columnas con nulos
+
+na_cols <- colnames(as.data.frame(find_nulls(select_if(train_filtered, is.numeric))))
+for (i in na_cols){
+
+    train_filtered[is.na(train_filtered[,i]),i] <- round(mean(train_filtered[,i], na.rm = TRUE))  
+}
+
+# Elimnio los registros NA en la columna country
+
+train_filtered <- filter(train_filtered, complete.cases(country))
+```
+```{r}
+colSums(is.na(train_filtered))[colSums(is.na(train_filtered)) > 0]
+```
+Se toma la decisión de desconsiderar la columna categorical_7 porque entre las 7 columnas categorical, se juntan muchas variables categoricas como para poder manejarlas en el modelo, terminarian quedando muchas columnas. Por eso en esta primera etapa no se tomarán en cuenta.
+
+```{r}
+train_filtered <- select(train_filtered, -c(categorical_1,categorical_2,categorical_3,categorical_4,
+                                           categorical_5,categorical_6,categorical_7))
+```                                  
+
+Separo en conjunto de train, validation & test
+
+El criterio que se tomo, en función de lo que se observa en el gráfico de churn en función del install date, es tomar los últimos días de instalaciones para los conjuntos de validacion y testeo. El motivo de esto es que son mis variables "futuras" dentro de los datos que tengo, por lo cual, es lógico que se intente recrear un escenario similar al que se tendra cuando se quiera predecir datos nuevos.
+
+Se toma:
+
+El último 2,5% de los datos para testeo
+El restante 2,5% de los ultimos datos para evaluacion
+Lo que resta de los datos para entrenamiento, los cuales a su vez se van a resamplear mediante k-fold
+
+```{r}
+grafico_7 <- train_filtered %>% group_by(install_date) %>% summarize(sum_churn = sum(churn)) %>% ungroup()
+ggplot(grafico_7) + geom_line(mapping = aes(x = install_date, y = sum_churn))
+```
+
+Ordeno el dataframe segun la fecha de instalación para poder separar los ultimos registros para mi conjunto de testeo y validacion
+
+```{r}
+train_filtered <- train_filtered[order(train_filtered$install_date),]
+rownames(train_filtered) <- c(1:nrow(train_filtered))
+```
+
+Descarto columnas generadas anteriormente para armar gráficos, así como tambien la fecha de instalacion, el id y el user_id, el device_model, el traffic_type y el country. 
+
+Todas menos traffic_type se descartaron porque al ser categóricas, convertirlas a un valor numérico que el modelo pueda aprovechar implicaría agregar muchisimas columnas, lo que no es óptimo.
+En el caso de traffic_type, esta tenía 0 variabilidad, todos los registros tenían el mismo número por lo que se descarta.
+
+```{r}
+train_filtered <- select(train_filtered, -c(install_date,id,user_id,device_model, traffic_type,
+                                            churn, sum_lost_battles, sum_start_battle, rt_lose_win_0,
+                                           rt_lose_win_1,rt_lose_win_2,rt_lose_win_3, sum_win_battles,
+                                            country))
+```
+
+
+```{r}
+train_filtered<- select(dummy_cols(train_filtered), -c(platform))
+
+```
+Convierto la columna Label en un factor para usar en el modelo
+
+
+```{r}
+train_filtered$Label <- as.factor(train_filtered$Label)
+```
+
+Ahora si, con las variables "listas", separo los grupos de validation, testing y training
+```{r}
+# Conjunto de testeo
+
+test_data <- train_filtered[c((nrow(train_filtered)-round(nrow(train_filtered)*0.025)):nrow(train_filtered)),]
+
+# Conjunto de validacion
+
+validation_data <-train_filtered[c((nrow(train_filtered)-(round(nrow(train_filtered)*0.025))*2)):c((nrow(train_filtered)-round(nrow(train_filtered)*0.025))-1),]
+
+# Conjunto de entrenamiento
+
+train_data <- train_filtered[c(0:(nrow(train_filtered) - nrow(test_data) - nrow(validation_data))),]
+
+# Saco la columna Label max played dsi porque es anaolga al target, por lo que en el futuro va a perjudicar al modelo
+
+test_data <- select(test_data, -c(Label_max_played_dsi))
+validation_data <- select(validation_data, -c(Label_max_played_dsi))
+train_data <- select(train_data, -c(Label_max_played_dsi))
+```
+
+Aplico KNN
+
+El mayor problema es que train data tiene demasiados registros, por lo cual, aplicar un knn sobre este consumiría mucho procesamiento e inclusive pinche y no pueda terminar de correr. Por lo tanto, voy a tomar un menor número, para la prueba A) se va a tomar 500.000 registros, principalmente para ver como se desempeña el modelo, después, si no demanda mucho, se intentará sobre 1.000.000 de registros.
+
+```{r}
+
+reduced_index  <- sample(c(1:nrow(train_data)), 500000)
+train_data <- train_data[reduced_index,]
+
+holdout_index  <- sample(c(1:nrow(train_data)), 10000)
+
+validation_data_reduced <- train_data[holdout_index,]
+train_data_reduced <- train_data[-holdout_index,]
+```
+```{r}
+str(train_data_reduced)
+```
+
+Pruebo un modelo de arboles de decision
+```{r}
+colnames(train_data_reduced)
+```
+```{r}
+# Entreno un modelo de vecinos mÃ¡s cercanos
+tree_fit <- rpart(Label ~., data = train_data_reduced,control = rpart.control(maxdepth = 30, xval=0,
+                                                      minsplit = 1, minbucket=3, cp=0))
+
+```
+
+Visualizo la importancia de las variables
+
+```{r}
+# Creo un dataframe con la importancia de cada variable
+
+important_feautres <- as.data.frame(tree_fit$variable.importance)
+
+important_feautres$features <- as.factor(rownames(important_feautres))
+
+# Cambio el nombre de una columna
+
+names(important_feautres)[1] <- 'relevance'
+
+# Grafico
+
+options(repr.plot.width = 14, repr.plot.height = 25)
+ggplot(important_feautres, aes(y = reorder(features, relevance), x = relevance)) + geom_bar(stat = "identity")
+```
+Reentreno el arbol pero con las variables mas importantes (>5000)
+
+```{r}
+# Entreno un modelo de vecinos mÃ¡s cercanos
+train_data_reduced <- select(train_data_reduced, c(important_feautres$features[important_feautres$relevance >= 7000], Label))
+tree_fit <- rpart(Label ~., data = train_data_reduced,control = rpart.control(maxdepth = 30, xval=0,
+                                                      minsplit = 1, minbucket=3, cp=0))
+
+```
+
+```{r}
+tree_predictions <- predict(tree_fit, newdata = select(validation_data_reduced, c(important_feautres$features[important_feautres$relevance >= 7000], Label)), type = "class")
+print(mean(validation_data_reduced$Label == tree_predictions))
+prop.table(table(predicted = tree_predictions, actual = validation_data_reduced$Label),2)
+
+
+```
+```{r}
+
+# Probemos distintas combinaciones de hiperparÃ¡metros
+
+depths <- c(1, 2, 3, 5, 10, 20, 30)
+minsplits <- c(1, 3, 5, 10, 15)
+minbuckets <- c(1, 3, 5, 10, 15)
+
+vld_accuracy <- data.frame()
+
+for (ms in minsplits) {
+
+    for (mb in minbuckets) {
+
+        for (d in depths) {
+
+            print(c(ms, mb, d))
+
+            tree_fit <- rpart(Label ~., data = train_data_reduced,
+                              control = rpart.control(maxdepth = d, xval=0,
+                                                      minsplit = ms, minbucket=mb, cp=0))
+
+            tmp_vd_pred <- predict(tree_fit, validation_data_reduced, type="class")
+
+            vld_accuracy  <- rbind(vld_accuracy,
+                                   data.frame(maxdepth = d,
+                                              minsplit = ms,
+                                              minbucket = mb,
+                                              acc = prop.table(table(predicted = tmp_vd_pred, actual = validation_data_reduced$Label),2)[,2][2]))
+                                              #acc=mean(validation_data_reduced$Label == tmp_vd_pred)))
+        }
+    }
+}
+
+# Veo la mejor configuraciÃ³n
+
+best_conf <- vld_accuracy[which.max(vld_accuracy$acc),]
+
+print(best_conf)
+```
+```{r}
+# Entreno la mejor configuraciÃ³n con todos los datos
+
+rpart.plot(rpart(class ~ .,
+                 data = train_data,
+                 control = rpart.control(maxdepth = best_conf$maxdepth,
+                                         minsplit = best_conf$minsplit,
+                                         minbucket = best_conf$minbucket,
+                                         xval=0, cp=0)))
+
+```
+
+```{r}
+
+pred <- predict(object = model,  
+                            newdata = validation_data_reduced,   
+                            type = "class")
+```
+Visualizo matriz de confunsion
+
+```{r}
+
+table(predicted = pred, actual = validation_data_reduced$Label)
+print(mean(pred == validation_data_reduced$Label))
+#confusionMatrix(data = validation_data_reduced$pred,       
+ #               reference = validation_data_reduced$Label)
+```
+
+```{r}
+k_vals <- c(1, seq(5, 50, by=5))
+vld_accuracy <- data.frame()
+
+folds <- 10
+
+indexes <- sample(rep_len((1:folds), nrow(train_data_reduced)))
+
+for (k in k_vals) {
+      print(k)
+      tmp_vd_pred <- knn(select(train_data_reduced, -c(Label)),
+                         select(validation_data_reduced, -c(Label)), train_data_reduced$Label, k)
+
+      vld_accuracy  <- rbind(vld_accuracy,
+                           data.frame(k = k, acc = mean(validation_data_reduced$Label == tmp_vd_pred)))
+
+}
+
+# Promedio por valor de k
+vld_accuracy <- vld_accuracy %>% group_by(k) %>%
+                    summarise(mean_acc=mean(acc), sd_acc=sd(acc))
+
+# Veo la mejor configuraciÃ³n
+vld_accuracy[which.max(vld_accuracy$mean_acc),]
+```
+Guardo la mejor configuracion
+
+```{r}
+
+best_k <- vld_accuracy[which.max(vld_accuracy$mean_acc), "k"]
+```
+
+
+Ahora aplico el mejor K (k = 30) al conjunto de validacion del concurso (es para entregar) despues se corre sobre la validacion separada:
+
+```{r}
+csv_dir <- "C:/Users/elosasso/OneDrive - Universidad Torcuato Di Tella/Mineria de datos/datasets/evaluation.csv"
+
+evaluation <- load_csv_data(csv_dir, sample_ratio = 1)
+```
+
+Me quedo con las mismas columnas que use en el entrenamiento
+
+```{r}
+selected_columns <- colnames(select(train_filtered, -c(Label, Label_max_played_dsi,platform_Android,platform_iOS)))
+
+evaluation <- select(evaluation,selected_columns,platform)
+
+```
+
+Quiero fijarme si hay valores nulos para imputar
+
+```{r}
+
+colSums(is.na(evaluation))[colSums(is.na(evaluation)) > 0]
+```
+```{r}
+
+# Imputo la media para el resto de las columnas con nulos
+
+
+evaluation$ChangeArena_sum_dsi3[is.na(evaluation$ChangeArena_sum_dsi3)] <- 0
+evaluation$OpenChest_sum_dsi2[is.na(evaluation$OpenChest_sum_dsi2)] <- 4
+evaluation$StartBattle_sum_dsi1[is.na(evaluation$StartBattle_sum_dsi1)] <- 13
+
+#evaluation[is.na(evaluation[,ChangeArena_sum_dsi3]),ChangeArena_sum_dsi3]  #round(mean(evaluation[,ChangeArena_sum_dsi3], na.rm = TRUE))
+
+#evaluation[is.na(evaluation[,OpenChest_sum_dsi2]),OpenChest_sum_dsi2] <- 4 #round(mean(evaluation[,OpenChest_sum_dsi2], na.rm = TRUE))
+
+#evaluation[is.na(evaluation[,StartBattle_sum_dsi1]),StartBattle_sum_dsi1] <- 13 #round(mean(evaluation[,StartBattle_sum_dsi1], na.rm = TRUE))
+
+```
+
+```{r}
+
+colSums(is.na(evaluation))[colSums(is.na(evaluation)) > 0]
+```
+
+Convierto la variable platform en una variable numerica
+
+```{r}
+evaluation <- select(dummy_cols(evaluation), -c(platform))
+```
+
+Aplico mi mejor modelo al conjunto validacion
+```{r}
+dim(evaluation); dim(train_data)
+
+```
+
+```{r}
+holdout_index  <- sample(c(1:nrow(train_data)), 200000)
+train_data_reduced <- train_data[-holdout_index,]
+ts_pred <- knn(select(train_data_reduced,-c(Label,Label_max_played_dsi)), evaluation,
+              train_data_reduced$Label, 30, prob = TRUE)
+```
