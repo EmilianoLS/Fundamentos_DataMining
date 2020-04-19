@@ -5,6 +5,8 @@ output: html_notebook
 
 Importo las librerias que voy a usar
 
+
+
 ```{r}
 library("stringr")
 library("data.table")
@@ -19,6 +21,8 @@ library(fastDummies)
 library(rpart)
 library(caret)
 library(rpart.plot)
+library(randomForest)
+library(caTools)
 ```
 
 Defino funcion para cargar todos los data frames de entrenamiento
@@ -262,20 +266,31 @@ labs(x = 'Media de batallas inicidadas', y = 'Dia') +
 ggtitle('Batallas iniciadas en promedio por día')
 ```
 
-Ahora que ya preparamos una analítica y comprendemos un poco mejor los datos, procedemos a preparar las variables para poder aplicarles un modelo de knn.
-Primero tengo que excluir los casos no confiables: Todos aquellos que tengan Label_max_played_dsi igual a 3, que hayan sido instalados en los días que van de 383 a 395 inclusive, ya que no son validos (desconozco si la persona hizo churn o no)
+Feature Engineering
+-------------------
+
+Ahora que ya preparamos una analitica y comprendemos un poco mejor los datos, procedemos a preparar las variables para poder aplicarles un modelo.
+
+Primero tengo que excluir los casos no confiables: Todos aquellos que tengan Label_max_played_dsi igual a 3, que hayan sido instalados en los dias que van de 383 a 395 inclusive, ya que no son validos (desconozco si la persona hizo churn o no).
+
+Entreno con un solo set de entrenamiento para manejar mejor los datos.
 
 ```{r}
-train_filtered <- filter(train, !(Label_max_played_dsi == 3 & install_date %in% (c(383:395))))
+setwd('C:/Users/elosasso/OneDrive - Universidad Torcuato Di Tella/Mineria de datos/datasets')
+
+train_data <- load_csv_data('train_4.csv')
+train_data[, Label := as.numeric(Label_max_played_dsi == 3)] 
+
+train_filtered <- filter(train_data, !(Label_max_played_dsi == 3 & install_date %in% (c(383:395))))
+train_filtered$random <- rnorm(nrow(train_filtered), mean = 15)
 ```
 
-Antes de avanzar sobre la separación del dataset en conjuntos de train, validation & test se evalúan qué variables podrían llegar a ser relevantes o no para el modelo.
+Antes de avanzar sobre la separación del dataset en conjuntos de train, validation & test se evaluan que variables podran llegar a ser relevantes o no para el modelo.
 
-NOTA: Para este primer summit, no se va a considerar ningun tipo de feature engineering del tipo de construccion de variables. Es decir, no se construiran variables nuevas a partir de las existentes, salvo para las categoricas. Se tomo esta decisión para entender el nivel de accuracy que tendria el modelo si tan solo utiliza las variables dadas. Es para tener una base de control, un accuracy minimo y sobre el cual ir trabajando.
 
-Como se había visto anteriormente, las variables de age y site tienen un alto porcentaje de valores faltantes, y no es posible imputarlos de ninguna forma, por lo que se desconsideran para el modelo. Esto es lamentable en el caso de age, ya que probablemente (no lo sabemos), podría haber sido un predictor importante.
+Como se habia visto anteriormente, las variables de age y site tienen un alto porcentaje de valores faltantes, y no es posible imputarlos de ninguna forma, por lo que se desconsideran para el modelo. Esto es lamentable en el caso de age, ya que probablemente (no lo sabemos), podria haber sido un predictor importante.
 
-Por otro lado, el resto de las columnas con valores nulos se decide imputarles la media. Excepto por device_model, que se decidio eliminar los registros nulos porque son muy pocos y no afectará al modelo significativamente. Tambien se elimniaran los registros nulos de country porque, si bien podría llegar a ser una columna importante, solamente estaríamos borrando el 2% de los registros
+Por otro lado, el resto de las columnas con valores nulos se decide imputarles la media. Excepto por device_model, que se decidio eliminar los registros nulos porque son muy pocos y no afectará al modelo significativamente. Tambien se elimniaran los registros nulos de country porque, si bien podria llegar a ser una columna importante, solamente estariamos borrando el 2% de los registros
 
 Tambien se vio que la columna BuyCard_sum_dsi_1 tiene valores negativos! Si bien esto se puede interpretar como que se le 'regalo' una carta, el hecho de que en las otras columnas de BuyCard_sum_dsi no hubiese valores negativos, lleva a pensar que son valores erroneos. Tomamos la decision de convertir estos valores negativos a 0, ya que es lo mas comun que observamos en las otras (entendemos el error que esto puede traer, pero es mejor que descartar completamente esta columna)
 
@@ -303,19 +318,148 @@ for (i in na_cols){
 
 train_filtered <- filter(train_filtered, complete.cases(country))
 ```
+
 ```{r}
 colSums(is.na(train_filtered))[colSums(is.na(train_filtered)) > 0]
 ```
-Se toma la decisión de desconsiderar la columna categorical_7 porque entre las 7 columnas categorical, se juntan muchas variables categoricas como para poder manejarlas en el modelo, terminarian quedando muchas columnas. Por eso en esta primera etapa no se tomarán en cuenta.
+Se toma la decision de desconsiderar la columna categorical_7 porque entre las 7 columnas categorical, se juntan muchas variables categoricas como para poder manejarlas en el modelo, terminarian quedando muchas columnas. Por eso en esta primera etapa no se tomarán en cuenta.
 
 ```{r}
 train_filtered <- select(train_filtered, -c(categorical_1,categorical_2,categorical_3,categorical_4,
-                                           categorical_5,categorical_6,categorical_7))
+                                           categorical_5,categorical_6,categorical_7,user_id, id,Label_max_played_dsi))
 ```                                  
+
+Verifico que todas las variables tengan el type correcto
+
+```{r}
+sapply(train_filtered, class)
+```
+
+
+Se ve que la variable target es numerica y deberia ser un factor, y existen valores numericos en algunas variables como OpenChest_sum_dsi2, que deberian ser int (sino trae valores con coma, esto no tiene sentido)
+
+```{r}
+train_filtered <- transform(train_filtered,
+                            OpenChest_sum_dsi2 = as.integer(OpenChest_sum_dsi2),
+                            TutorialStart = as.factor(TutorialStart),
+                            TutorialStartPart1 = as.factor(TutorialStartPart1),
+                            TutorialStartPart2 = as.factor(TutorialStartPart2),
+                            TutorialStartPart3 = as.factor(TutorialStartPart3),
+                            TutorialStartPart4 = as.factor(TutorialStartPart4),
+                            TutorialStartPart5 = as.factor(TutorialStartPart5),
+                            TutorialStartPart6 = as.factor(TutorialStartPart6),
+                            TutorialFinish = as.factor(TutorialFinish),
+                            StartBattle_sum_dsi1 = as.integer(StartBattle_sum_dsi1),
+                            ChangeArena_sum_dsi3 = as.integer(ChangeArena_sum_dsi3),
+                            BuyCard_sum_dsi1 = as.integer(BuyCard_sum_dsi1),
+                            Label = as.factor(Label)
+                            )
+```
+
+
+# Separo en conjunto de train y validacion
+
+Voy a separar en dos conjuntos para entrenar y validar posteriormente, siempre trabajando con el dataset de train_4, despues, voy a usar el conjunto de train_5 para validar con datos 100% nuevos
+
+```{r}
+
+set.seed(123)
+val_index <- sample(c(1:nrow(train_filtered)), 217000)
+
+train_data_tr <- train_filtered[-val_index,]
+val_data <- train_filtered[val_index,]
+
+```
+
+
+Ahora aplico distintos modelos y preprocesamientos, validando contra el conjunto de validacion para ver si cualquier modificacion que haga esta mejorando o empeorando el modelo
+
+# Dataset crudo con un random forest 
+
+### Busco eliminar variables innecesarias (todavia genero nuevas ni elimine outliers)
+
+
+```{r}
+
+rf <- randomForest(ntree = 100,
+                   importance = TRUE,
+                   Label ~ .,
+                   data = select(val_data, -c(country,device_model))
+  
+)
+```
+
+```{r}
+rf
+```
+
+
+```{r}
+
+# Creo un dataframe con la importancia de cada variable
+
+important_feautres <- as.data.frame(importance(rf))
+
+important_feautres$features <- as.factor(rownames(important_feautres))
+
+# Cambio el nombre de una columna
+
+#names(important_feautres)[3] <- 'relevance'
+
+# Grafico
+
+options(repr.plot.width = 14, repr.plot.height = 25)
+ggplot(important_feautres, aes(y = reorder(features, MeanDecreaseAccuracy), x = MeanDecreaseAccuracy)) + geom_bar(stat = "identity")
+
+#plot(importance(rf))
+```
+
+Me quedo con las variables que tienen una importancia superior a la random
+
+```{r}
+
+not_important_features <- c(select(filter(important_feautres, MeanDecreaseAccuracy < important_feautres$MeanDecreaseAccuracy[important_feautres$features == 'random']),features))
+
+not_important_features <- c('LoseTournamentBattle_sum_dsi2','LoseTournamentBattle_sum_dsi1','LoseTournamentBattle_sum_dsi0','StartTournamentBattle_sum_dsi1','LoseTournamentBattle_sum_dsi3','StartTournamentBattle_sum_dsi0','WinTournamentBattle_sum_dsi3','QuitTournament_sum_dsi3','WinTournamentBattle_sum_dsi2','QuitTournament_sum_dsi0','JoinTournament_sum_dsi1','StartTournamentBattle_sum_dsi3','WinTournamentBattle_sum_dsi0','OpenPiggyBank_sum_dsi3','traffic_type','JoinTournament_sum_dsi2','JoinTournament_sum_dsi0','OpenPiggyBank_sum_dsi2','QuitTournament_sum_dsi1','QuitTournament_sum_dsi2','WinTournamentBattle_sum_dsi1','StartTournamentBattle_sum_dsi2','country','device_model')
+```
+
+Pruebo de nuevo el random forest solo con lo mas relevante:
+
+
+```{r}
+rf <- randomForest(ntree = 100,
+                   Label ~ .,
+                   data = select(val_data, -not_important_features))
+```
+
+```{r}
+
+rf
+
+```
+
+
+```{r}
+
+fitControl <- trainControl(method = "cv",
+                           verboseIter = TRUE,
+                           classProbs=TRUE,
+                           summaryFunction = twoClassSummary)
+
+
+rpart_fit_grid <- train(x = train_data_tr %>% select(-Label),
+                        y = validation_data$Label,
+                        method = "rpart",
+                        trControl = fitControl,
+                        na.action = "na.omit",
+                        metric = "ROC")
+
+```
+
 
 Separo en conjunto de train, validation & test
 
-El criterio que se tomo, en función de lo que se observa en el gráfico de churn en función del install date, es tomar los últimos días de instalaciones para los conjuntos de validacion y testeo. El motivo de esto es que son mis variables "futuras" dentro de los datos que tengo, por lo cual, es lógico que se intente recrear un escenario similar al que se tendra cuando se quiera predecir datos nuevos.
+El criterio que se tomo, en función de lo que se observa en el gráfico de churn en función del install date, es tomar los ultimos de instalaciones para los conjuntos de validacion y testeo. El motivo de esto es que son mis variables "futuras" dentro de los datos que tengo, por lo cual, es lógico que se intente recrear un escenario similar al que se tendra cuando se quiera predecir datos nuevos.
 
 Se toma:
 
@@ -380,6 +524,30 @@ validation_data <- select(validation_data, -c(Label_max_played_dsi))
 train_data <- select(train_data, -c(Label_max_played_dsi))
 ```
 
+```{r}
+
+train_data <- load_csv_data('train_4.csv')
+
+fitControl <- trainControl(method = "cv",
+                           verboseIter = TRUE,
+                           classProbs=TRUE,
+                           summaryFunction = twoClassSummary)
+
+
+rpart_fit_grid <- train(x = validation_data %>% select(-Label),
+                        y = validation_data$Label,
+                        method = "rpart",
+                        trControl = fitControl,
+                        na.action = "na.omit",
+                        metric = "ROC")
+
+```
+
+
+
+
+
+
 Aplico KNN
 
 El mayor problema es que train data tiene demasiados registros, por lo cual, aplicar un knn sobre este consumiría mucho procesamiento e inclusive pinche y no pueda terminar de correr. Por lo tanto, voy a tomar un menor número, para la prueba A) se va a tomar 500.000 registros, principalmente para ver como se desempeña el modelo, después, si no demanda mucho, se intentará sobre 1.000.000 de registros.
@@ -431,6 +599,7 @@ Reentreno el arbol pero con las variables mas importantes (>5000)
 
 ```{r}
 # Entreno un modelo de vecinos mÃ¡s cercanos
+
 train_data_reduced <- select(train_data_reduced, c(important_feautres$features[important_feautres$relevance >= 7000], Label))
 tree_fit <- rpart(Label ~., data = train_data_reduced,control = rpart.control(maxdepth = 30, xval=0,
                                                       minsplit = 1, minbucket=3, cp=0))
