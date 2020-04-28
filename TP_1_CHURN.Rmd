@@ -1,11 +1,11 @@
 ---
-title: "R Notebook"
+title: "Tp_churn_data_mining"
 output: html_notebook
 ---
 
 Importo las librerias que voy a usar
 
-```{r}
+```{r message=FALSE, warning=FALSE}
 library("stringr")
 library("data.table")
 library(ggplot2)
@@ -22,11 +22,12 @@ library(rpart.plot)
 library(randomForest)
 library(caTools)
 library(robustbase)
+library(xgboost)
 ```
 
 Defino funcion para cargar todos los data frames de entrenamiento
 
-```{r}
+```{r Load_csv_function, message=FALSE, warning=FALSE}
 load_csv_data <- function(csv_file, sample_ratio = 1, drop_cols = NULL,
                           sel_cols = NULL) {
   # Esta funcion carga un unico csv con los parametros que le indique
@@ -81,7 +82,11 @@ load_train_data <- function(data_dir, train_file="/train_", sample_ratio=1,
 }
 ```
 
-Cargo dataframe de un tama√±o del 10% del original
+# Analisis exploratorio de las variables
+
+En esta secciÛn se va a hacer una primera aproximaciÛn a los datos, observando las relaciones entre las variables, entendiendo su composiciÛn, cÛmo est·n distribuidas, etc.
+
+Cargo dataframe en su totalidad
 
 ```{r}
 csv_dir <- "C:/Users/elosasso/OneDrive - Universidad Torcuato Di Tella/Mineria de datos/datasets"
@@ -90,21 +95,29 @@ train <- load_train_data(csv_dir, sample_ratio = 1)
 train$churn <- train$Label == 1
 ```
 
+Hago una primera visualizaciÛn de la estructura para ver cÛmo se encuentran organizados los datos y para ver que todo estÈ cargado correctamente
+
 ```{r}
 head((train));dim(train)
 ```
+
+Visualizo cuantiles, mÌnimos, m·ximos y NAs
 
 ```{r}
 summary(train)
 ```
 
+A raÌz de la tabla anterior, ya podemos observar dos cosas muy importantes:
+
 * La columna 'age' no puede tomarse para analizar por su alto contenido de NAs, no podemos inferir estos datos de ninguna forma
+
 * La columna 'BuyCard_sum_dsi1' tiene valores negativos, esto pareciera ser un error, y viendo el comportamiento en las demas columnas de este estilo, podria imputarse el valor 0 a estos negativos
 
 Reviso las columnas con valores nulos y sus porcentajes
-Para eso creo una funci√≥n que me trae el porcentaje de nulos en las columnas que unicamente tienen nulos
 
-```{r}
+Para eso creo una funcion que me trae el porcentaje de nulos en las columnas que unicamente tienen nulos
+
+```{r find_nulls_function, message=FALSE, warning=FALSE}
 find_nulls <- function(df){
     columnas_nas <- list()
 
@@ -123,16 +136,24 @@ find_nulls <- function(df){
 as.data.frame(find_nulls(train))
 ```
 
+# VisualizaciÛn
 
-Hago una anal√?tica sobre algunas variables para entender su relaci√≥n con la target a predecir
+En esta parte, empezamos a meternos m·s en los datos. Queremos entender, o al menos, tener un primer insight de las variables que m·s relaciÛn tienen con la target, si hay mayor o menor proporciÛn de alguna variable en particular.
+
+La primera relaciÛn que se nos ocurriÛ fue con las variables relacionadas al tutorial. Cuando jugamos el juego, vimos que el tutorial es bastante extenso, y cubre bastantes de los elementos m·s importantes del juego. Suponemos que existe, entonces, alguna relaciÛn entre el hecho de haber terminado el tutorial y hacer churn o no.
 
 ```{r}
 ggplot(train) + geom_bar(mapping = aes(x = TutorialFinish, fill = churn), position = 'fill') +
 labs(x = 'Termino el tutorial', y = '% churn') +
-ggtitle('Proporcion de churn seg√∫n termin√≥ o no el tutorial')
+ggtitle('Proporcion de churn segun termino o no el tutorial')
 ```
 
-Me imagino que una persona har√?a Churn seg√∫n haya perdido m√°s batallas en los primeros d√?as. Pongo a prueba esa suposici√≥n creando la sumatoria de las variables Lose battle, Win battle y Start battle
+Vemos en el gr·fico de proporciones que, si bien la proporciÛn de personas que hicieron churn es mayor para el grupo que no terminÛ el tutorial, la diferencia no es significativa respecto a los que sÌ lo terminaron, sino que tienen niveles similares.
+
+
+Por otro lado, supuonemos que una persona que pierda m·s batallas ser· m·s propensa a hacer Churn. 
+Para comprobar esta hipÛtesis, sumamos todas las batallas iniciadas, y todas las batallas perdidas, y hacemos un gr·fico de relaciÛn, separado por los grupos de churn y no churn.
+
 
 ```{r}
 train$sum_lost_battles <- train$LoseBattle_sum_dsi0 + train$LoseBattle_sum_dsi1 + train$LoseBattle_sum_dsi2 + train$LoseBattle_sum_dsi3
@@ -152,9 +173,13 @@ labs(x = 'Batallas iniciadas', y = 'Batallas perdidas') +
 ggtitle('Batallas perdidas vs Batallas iniciadas')
 ```
 
-Podr√?a ocurrir que haya alguna relaci√≥n entre la cantidad de sesiones iniciadas y el hecho de hacer churn. Se busca la cantidad de sesiones iniciadas para los primeros 4 d√?as desde la instalaci√≥n hasta el d√?a 3, para ambos grupos.
+Lo primero que vemos es que hay una relaciÛn casi lineal entre las batallas iniciadas y las perdidas. Esto es lÛgico, porque cuanto m·s se juegue, es lÛgico pensar que la cantidad de veces que pierda tambiÈn tienda a aumentar. 
 
-Luego se calcula la media de sesiones iniciadas para entender si verdaderamente hay una relaci√≥n
+Sin embargo, cuando vemos la distribuciÛn de los puntos de cada color, vemos que todos se encuentran bastante superpuestos, con lo cual, estas variables no separan casi nada los grupos de churn y no churn.
+
+Otra idea, relacionada a las batallas iniciadas del punto anterior, es que puede llegar a ocurrir que exista una relaciÛn entre la cantidad de sesiones que inicia el usuario y el hecho de hacer churn. Por esto, vemos la cantidad de sesiones iniciadas para cada grupo, en cada uno de los dÌas desde la instalaciÛn.
+
+Luego se calcula la media de sesiones iniciadas para entender si verdaderamente hay una relaciÛn.
 
 ```{r}
 train_melt <- melt(select(train, user_id, StartSession_sum_dsi0,StartSession_sum_dsi1,StartSession_sum_dsi2,
@@ -166,7 +191,7 @@ grafico
 ggplot(grafico, mapping = aes(x = total, y = variable, fill = churn)) +
 geom_bar(color = 'black',stat = 'identity', position = 'dodge') + facet_wrap(~churn, ncol = 1) +
 labs(x = 'Total de sesiones', y = 'Dia') +
-ggtitle('Cantidad de sesiones por d√?a')
+ggtitle('Cantidad de sesiones por dia')
 ```
 
 Agrupo por dia desde la instalacion y calculo el intervalo de confianza para la media
@@ -184,23 +209,40 @@ geom_point(mapping = aes(x = mean, y = variable, fill = churn),color = 'black',s
 geom_errorbar(aes(xmin = intervalo_inf, xmax = intervalo_sup, y = variable), color = 'red') +
 facet_wrap(~churn, ncol = 1) +
 labs(x = 'Media de sesiones', y = 'Dia') + 
-ggtitle('Cantidad de sesiones promedio por d√?a')
+ggtitle('Cantidad de sesiones promedio por dia')
 ```
 
-Quiero entender la cantidad de instalaciones por d√?a que hay, para ver si hay alguna tendencia
+Vemos que encontramos alguna especie de relaciÛn entre las sesiones y los grupos de churn y no churn. Puntualmente se ve que el comportamiento en sesiones iniciadas para un grupo y otro es completamente diferente. 
+
+Por un lado, el grupo de usuarios que hicieron churn tiene una media de sesiones iniciadas diarias m·s baja que el grupo que no hizo churn, y que posteriormente baja hasta el tercer dÌa de la instalaciÛn. Esto no pasa con el otro grupo, sino que m·s bien se mantiene constante durante los primeros dÌas
+
 
 ```{r}
-grafico_3 <- train %>% group_by(install_date) %>% summarize(total_installed = n()) %>% ungroup()
 
-ggplot(grafico_3) + geom_line(mapping = aes(x = install_date, y = total_installed)) +
-geom_vline(xintercept = c(398:399), color = 'red', linetype = 'dashed') +
-geom_vline(xintercept = c(134,29,133,28,246), color = 'blue', linetype = 'dashed') +
-geom_text(aes(x = 134, label="\n 34260 instalaciones", y = 30000), colour="blue", angle=90, text=element_text(size=5)) + 
-geom_text(aes(x = 29, label="\n 32773 instalaciones", y = 30000), colour="blue", angle=90, text=element_text(size=5))+
-geom_text(aes(x = 243, label="\n 29196 instalaciones", y = 30000), colour="blue", angle=90, text=element_text(size=5)) +
-labs(x = 'Dia de instalacion', y = 'Cantidad de instalaciones') + 
-ggtitle('Evolucion de las instalaciones')
+
+train$install_day <- if_else(train$install_date %in% seq(from = 0, to = (56*7), by = 7), 'A', 
+                             if_else(train$install_date %in% seq(from = 1, to = (56*7)+1, by = 7), 'B',
+                                     if_else(train$install_date %in% seq(from = 2, to = (56*7)+2, by = 7), 'C',
+                                             if_else(train$install_date %in% seq(from = 3, to = (56*7)+3, by = 7), 'D',
+                                                     if_else(train$install_date %in% seq(from = 4, to = (56*7)+4, by = 7), 'F', 
+                                                             if_else(train$install_date %in% seq(from = 5, to = (55*7)+5, by = 7), 'G',
+                                                                     if_else(train$install_date %in% seq(from = 6, to = (55*7)+6, by = 7), 'H','NA')))))))
+#train$install_day <- if_else(train$install_date+1 %in% c(1:56*7,by = 7))
+
 ```
+
+```{r}
+prop_churn_dia <- as.data.frame(prop.table(table(train$install_day, train$Label),2)[,2])
+
+names(prop_churn_dia)[1] <- 'Proporcion_churn'
+prop_churn_dia$day <- row.names(prop_churn_dia)
+ggplot(prop_churn_dia, aes(day, Proporcion_churn)) + geom_point() +
+  labs(x = 'Dia de instalacion', title = 'Proporcion de churn total segun el dia de instalacion')
+rm(prop_churn_dia)
+```
+
+
+
 
 Busco si existe una relaci√≥n entre la cantidad de batallas ganadas/ batallas perdidas
 
@@ -223,10 +265,10 @@ geom_point(mapping = aes(x = mean, y = variable, fill = churn),color = 'black',s
 geom_errorbar(aes(xmin = intervalo_inf, xmax = intervalo_sup, y = variable), color = 'red') +
 facet_wrap(~churn, ncol = 1) +
 labs(x = 'Media de resultados por dia', y = 'Dia') + 
-ggtitle('Resultados promedio por d√?a')
+ggtitle('Resultados promedio por d√???a')
 ```
 
-Promedio de batallas perdidas por d√?a
+Promedio de batallas perdidas por d√???a
 
 ```{r}
 train_melt <- melt(select(train, user_id, LoseBattle_sum_dsi0,LoseBattle_sum_dsi1,LoseBattle_sum_dsi2,
@@ -242,7 +284,7 @@ geom_point(mapping = aes(x = mean, y = variable, fill = churn),color = 'black',s
 geom_errorbar(aes(xmin = intervalo_inf, xmax = intervalo_sup, y = variable), color = 'red') +
 facet_wrap(~churn, ncol = 1) +
 labs(x = 'Media de batallas perdidas', y = 'Dia') + 
-ggtitle('Batallas perdidas en promedio por d√?a')
+ggtitle('Batallas perdidas en promedio por d√???a')
 ```
 
 Promedio de batallas iniciadas (esto lo hago para entender si la menor cantidad de batallas perdidas por aquellos que hicieron churn en el gr√°fico anterior se debe a que jugaron menos)
@@ -262,7 +304,7 @@ geom_point(mapping = aes(x = mean, y = variable, fill = churn),color = 'black',s
 geom_errorbar(aes(xmin = intervalo_inf, xmax = intervalo_sup, y = variable), color = 'red') +
 facet_wrap(~churn, ncol = 1) +
 labs(x = 'Media de batallas inicidadas', y = 'Dia') + 
-ggtitle('Batallas iniciadas en promedio por d√?a')
+ggtitle('Batallas iniciadas en promedio por d√???a')
 ```
 
 Feature Engineering
@@ -322,9 +364,7 @@ for (i in na_cols){
 train_filtered <- filter(train_filtered, complete.cases(country))
 ```
 
-```{r}
-colSums(is.na(train_filtered))[colSums(is.na(train_filtered)) > 0]
-```
+
 Se toma la decision de desconsiderar la columna categorical_7 porque entre las 7 columnas categorical, se juntan muchas variables categoricas como para poder manejarlas en el modelo, terminarian quedando muchas columnas. Por eso en esta primera etapa no se tomar√°n en cuenta.
 
 ```{r}
@@ -362,7 +402,7 @@ train_filtered <- transform(train_filtered,
 
 # Separo en conjunto de train y validacion
 
-Voy a separar en dos conjuntos para entrenar y validar posteriormente, siempre trabajando con el dataset de train_4, despues, voy a usar el conjunto de train_5 para validar con datos 100% nuevos
+Voy a separar en dos conjuntos para entrenar y validar posteriormente, siempre trabajando con el dataset de train_4.
 
 ```{r}
 
@@ -375,8 +415,9 @@ val_data <- train_filtered[val_index,]
 ```
 
 
+# Modelado
 
-Ahora aplico distintos modelos y preprocesamientos, validando contra el conjunto de validacion para ver si cualquier modificacion que haga esta mejorando o empeorando el modelo
+Ahora aplico distintos modelos y preprocesamientos, validando contra el conjunto de validacion para ver si cualquier modificacion que haga esta mejorando o empeorando el modelo.
 
 # Dataset crudo con un random forest 
 
@@ -426,12 +467,6 @@ Me quedo con las variables que tienen una importancia superior a la random
 
 not_important_features <- c('LoseTournamentBattle_sum_dsi2','LoseTournamentBattle_sum_dsi1','LoseTournamentBattle_sum_dsi0','StartTournamentBattle_sum_dsi1','LoseTournamentBattle_sum_dsi3','StartTournamentBattle_sum_dsi0','WinTournamentBattle_sum_dsi3','QuitTournament_sum_dsi3','WinTournamentBattle_sum_dsi2','QuitTournament_sum_dsi0','JoinTournament_sum_dsi1','StartTournamentBattle_sum_dsi3','WinTournamentBattle_sum_dsi0','OpenPiggyBank_sum_dsi3','traffic_type','JoinTournament_sum_dsi2','JoinTournament_sum_dsi0','OpenPiggyBank_sum_dsi2','QuitTournament_sum_dsi1','QuitTournament_sum_dsi2','WinTournamentBattle_sum_dsi1','StartTournamentBattle_sum_dsi2','country','device_model','random','JoinTournament_sum_dsi3','TutorialStart','install_date','TutorialStartPart1','OpenPiggyBank_sum_dsi1','TutorialStartPart3','StartGameplayModeBattle_sum_dsi0','TutorialStartPart5','TutorialFinish','ChangeArena_sum_dsi3','OpenPiggyBank_sum_dsi0','TutorialStartPart6','StartGameplayModeBattle_sum_dsi1','BuyCard_sum_dsi3','StartGameplayModeBattle_sum_dsi3','TutorialStartPart4','TutorialStartPart2','platform','StartGameplayModeBattle_sum_dsi2','BuyCard_sum_dsi2') #volver a meter la random
 ```
-
-```{r}
-descrCor <- cor(select_if(train_data_tr,is.numeric))
-summary(descrCor[upper.tri(descrCor)])
-```
-
 
 
 # Modelo 1
@@ -511,7 +546,7 @@ val_data <- select(val_data, -c(not_important_features))
 
 ```{r}
 
-library(xgboost)
+
 
 
 dtrain <- xgb.DMatrix(data = as.matrix(train_data_tr[,colnames(train_data_tr) != 'Label']),
@@ -532,6 +567,159 @@ vanilla_model <- xgb.train(data = dtrain, nrounds = 40,
 
 Se obtiene una mejora en el auc general (recordemos que el modelo de arbol simple, con el recorte de features mas significativos, obtuvo un auc de 0.68). 
 
+# Busqueda de hiperparametros
+
+```{r funcion_sparse_xgboost_gridsearch}
+
+random_grid <- function(size,
+                        min_nrounds, max_nrounds,
+                        min_max_depth, max_max_depth,
+                        min_eta, max_eta,
+                        min_gamma, max_gamma,
+                        min_colsample_bytree, max_colsample_bytree,
+                        min_min_child_weight, max_min_child_weight,
+                        min_subsample, max_subsample) {
+
+    rgrid <- data.frame(nrounds = if (min_nrounds == max_nrounds) {
+                                      rep(min_nrounds, size)
+                                  } else {
+                                      sample(c(min_nrounds:max_nrounds),
+                                             size = size, replace = TRUE)
+                                  },
+                        max_depth = if (min_max_depth == max_max_depth) {
+                                      rep(min_max_depth, size)
+                                  } else {
+                                      sample(c(min_max_depth:max_max_depth),
+                                             size = size, replace = TRUE)
+                                  },
+                        eta = if (min_eta == max_eta) {
+                                      rep(min_eta, size)
+                                  } else {
+                                      round(runif(size, min_eta, max_eta), 5)
+                                  },
+                        gamma = if (min_gamma == max_gamma) {
+                                      rep(min_gamma, size)
+                                  } else {
+                                      round(runif(size, min_gamma, max_gamma), 5)
+                                  },
+                        colsample_bytree = if (min_colsample_bytree == max_colsample_bytree) {
+                                      rep(min_colsample_bytree, size)
+                                  } else {
+                                      round(runif(size, min_colsample_bytree, max_colsample_bytree), 5)
+                                  },
+                        min_child_weight = if (min_min_child_weight == max_min_child_weight) {
+                                      rep(min_min_child_weight, size)
+                                  } else {
+                                      round(runif(size, min_min_child_weight, max_min_child_weight), 5)
+                                  },
+                        subsample = if (min_subsample == max_subsample) {
+                                      rep(min_subsample, size)
+                                  } else {
+                                      round(runif(size, min_subsample, max_subsample), 5)
+                                  })
+
+    return(rgrid)
+}
+
+
+train_xgboost <- function(data_train, data_val, rgrid) {
+
+    watchlist <- list(train = data_train, valid = data_val)
+
+    predicted_models <- list()
+
+    for (i in seq_len(nrow(rgrid))) {
+        print(i)
+        print(rgrid[i,])
+
+        trained_model <- xgb.train(data = data_train,
+                                   params=as.list(rgrid[i, c("max_depth",
+                                                             "eta",
+                                                             "gamma",
+                                                             "colsample_bytree",
+                                                             "subsample",
+                                                             "min_child_weight")]),
+                                   nrounds = rgrid[i, "nrounds"],
+                                   watchlist = watchlist,
+                                   objective = "binary:logistic",
+                                   eval.metric = "auc",
+                                   print_every_n = 10)
+
+        perf_tr <- tail(trained_model$evaluation_log, 1)$train_auc
+        perf_vd <- tail(trained_model$evaluation_log, 1)$valid_auc
+        print(c(perf_tr, perf_vd))
+
+        predicted_models[[i]] <- list(results = data.frame(rgrid[i,],
+                                                           perf_tr = perf_tr,
+                                                           perf_vd = perf_vd),
+                                      model = trained_model)
+
+        rm(trained_model)
+
+        gc()
+    }
+
+    return(predicted_models)
+}
+
+
+result_table <- function(pred_models) {
+
+    res_table <- data.frame()
+    i <- 1
+
+    for (m in pred_models) {
+        res_table <- rbind(res_table, data.frame(i = i, m$results))
+        i <- i + 1
+    }
+
+    res_table <- res_table[order(-res_table$perf_vd),]
+
+    return(res_table)
+}
+
+```
+
+
+```{r}
+dtrain <- xgb.DMatrix(data = as.matrix(train_data_tr[,colnames(train_data_tr) != 'Label']),
+                      label = as.matrix(train_data_tr[,colnames(train_data_tr) == 'Label']))
+
+dvalid <- xgb.DMatrix(data = as.matrix(val_data[,colnames(val_data) != 'Label']),
+                      label = as.matrix(val_data[,colnames(val_data) == 'Label']))
+
+rgrid <- random_grid(size = 30,
+                     min_nrounds = 20, max_nrounds = 60,
+                     min_max_depth = 1, max_max_depth = 6,
+                     min_eta = 0.0025, max_eta = 0.1,
+                     min_gamma = 0, max_gamma = 1,
+                     min_colsample_bytree = 0.6, max_colsample_bytree = 1,
+                     min_min_child_weight = 1, max_min_child_weight = 10,
+                     min_subsample = 0.75, max_subsample = 1)
+
+predicted_models <- train_xgboost(dtrain, dvalid, rgrid)
+```
+
+```{r}
+res_table <- result_table(predicted_models)
+print(res_table)
+
+```
+
+```{r}
+# Predicts in evaluation
+eval_preds <- data.frame(id = 0:(nrow(evaluation)-1),
+                         Label = predict(predicted_models[[res_table[1, "i"]]]$model,
+                                         newdata = as.matrix(evaluation)))
+
+options(scipen = 999)  # Para evitar que se guarden valores en formato cient√???fico
+write.table(eval_preds, "modelo_con_random_search.csv",
+            sep = ",", row.names = FALSE, quote = FALSE)
+options(scipen=0, digits=7)  # Para volver al comportamiento tradicional
+
+```
+
+
 Esto sugiere que el xgboost es un buen modelo para seguir trabajando y, si bien podrÌan tocarse algunos hiperpar·metros, optamos por empezar a hacer una limpieza y preprocesamiento de los datos, a saber:
 
 * Limpieza de outliers
@@ -543,80 +731,9 @@ Esto sugiere que el xgboost es un buen modelo para seguir trabajando y, si bien 
 
 Visualizo las variables mas relevantes para ver los outliers de estos 
 
-```{r}
-
-boxplot(train_data_tr[,c('EnterDeck_sum_dsi0','OpenChest_sum_dsi0','soft_negative','WinBattle_sum_dsi0','StartBattle_sum_dsi1')], col = 'orange', main = 'Features Boxplot - Top 5 variables', horizontal = TRUE)
-
-```
-
-La variable soft_negative es la que tiene outliers mas groseros, por lo que esta distorsionando la escala y no pueden verse las otras variables.
-
-```{r}
-
-options(repr.plot.width = 50, repr.plot.height = 25)
-boxplot(train_data_tr[,c('EnterDeck_sum_dsi0','OpenChest_sum_dsi0','WinBattle_sum_dsi0','StartBattle_sum_dsi1')], col = 'orange', main = 'Features Boxplot - Top 5 variables', horizontal = TRUE, las = 1, ylab = 'Features')
-
-```
 
 
 
-```{r}
-Q3 <- quantile(train_data_tr$EnterDeck_sum_dsi0, 0.75)
-Q1 <- quantile(train_data_tr$EnterDeck_sum_dsi0, 0.25)
-
-thd <- 1.5 * IQR(train_data_tr$EnterDeck_sum_dsi0)
-
-limit_sup <- Q3 + thd
-limit_inf <- Q1 - thd
-
-
-train_data_tr <- filter(train_data_tr,(EnterDeck_sum_dsi0 < limit_sup)|(EnterDeck_sum_dsi0 > limit_inf))
-
-```
-
-```{r}
-Q3 <- quantile(train_data_tr$OpenChest_sum_dsi0, 0.75)
-Q1 <- quantile(train_data_tr$OpenChest_sum_dsi0, 0.25)
-
-thd <- 1.5 * IQR(train_data_tr$OpenChest_sum_dsi0)
-
-limit_sup <- Q3 + thd
-limit_inf <- Q1 - thd
-
-
-train_data_tr <- filter(train_data_tr,(OpenChest_sum_dsi0 < limit_sup)|(OpenChest_sum_dsi0 > limit_inf))
-```
-
-
-```{r}
-
-Q3 <- quantile(train_data_tr$WinBattle_sum_dsi0, 0.75)
-Q1 <- quantile(train_data_tr$WinBattle_sum_dsi0, 0.25)
-
-thd <- 1.5 * IQR(train_data_tr$WinBattle_sum_dsi0)
-
-limit_sup <- Q3 + thd
-limit_inf <- Q1 - thd
-
-
-train_data_tr <- filter(train_data_tr,(WinBattle_sum_dsi0 < limit_sup)&(WinBattle_sum_dsi0 > limit_inf))
-
-```
-
-```{r}
-
-Q3 <- quantile(train_data_tr$soft_negative, 0.75)
-Q1 <- quantile(train_data_tr$soft_negative, 0.25)
-
-thd <- 1.5 * IQR(train_data_tr$soft_negative)
-
-limit_sup <- Q3 + thd
-limit_inf <- Q1 - thd
-
-
-train_data_tr <- filter(train_data_tr,(soft_negative < limit_sup)&(soft_negative > limit_inf))
-
-```
 
 
 # Pruebo XGBOOST sobre el dataset limpio
@@ -641,43 +758,6 @@ vanilla_model_v2 <- ?xgb.train(data = dtrain, nrounds = 40,
 
 Falta seguir sacando outliers
 
-```{r}
-#train_data_tr$Label <- factor(if_else(train_data_tr$Label == 1,'churn','no_churn')
-
-# set up the cross-validated hyper-parameter search
-xgb_grid_1 = expand.grid(
-  nrounds = 1000,
-  eta = c(0.01, 0.001, 0.0001),
-  max_depth = c(2, 4, 6, 8, 10),
-  gamma = 1
-)
- 
- 
-# pack the training control parameters
-# pack the training control parameters
-xgb_trcontrol_1 = trainControl(
-  method = "cv",
-  number = 5,
-  verboseIter = TRUE,
-  returnData = FALSE,
-  returnResamp = "all",                                                        # save losses across all models
-  classProbs = TRUE,                                                           # set to TRUE for AUC to be computed
-  summaryFunction = twoClassSummary,
-  allowParallel = TRUE
-)
-
- 
-# train the model for each parameter combination in the grid,
-#   using CV to evaluate
-xgb_train_1 = train(
-  x = as.matrix(train_data_tr %>%
-                  select(-Label)),
-  y = as.factor(train_data_tr$Label),
-  trControl = xgb_trcontrol_1,
-  tuneGrid = xgb_grid_1,
-  method = "xgbTree"
-)
-```
 
 
 # Pendiente: Usar el estimador MCD (Mean Covariance Determinant) para eliminar outliers de forma robusta
@@ -728,7 +808,7 @@ eval_preds <- data.frame(id = 0:(nrow(evaluation)-1),
                                          as.matrix(evaluation)))
 
 # Armo el archivo para subir a Kaggle
-options(scipen = 999)  # Para evitar que se guarden valores en formato cient√?fico
+options(scipen = 999)  # Para evitar que se guarden valores en formato cient√???fico
 write.table(eval_preds, "modelo_4_xgboost.csv",
             sep = ",", row.names = FALSE)
 options(scipen=0, digits=7)  # Para volver al comportamiento tradicional
